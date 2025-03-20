@@ -6,86 +6,423 @@
     <title>Leg Raise Detection</title>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose"></script>
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script>
-    <style>
-        body { text-align: center; font-family: Arial, sans-serif; }
-        canvas { position: absolute; left: 0; top: 0; z-index: 1; }
-        video { transform: scaleX(-1); display: none; margin: auto; }
-    </style>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils"></script>
+    <!-- Reference to GitHub-hosted stylesheet via jsDelivr CDN -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/abm2002-code/fitflex-styles@main/styles.css">
 </head>
 <body>
-    <h1>Leg Raise Detection</h1>
-    <video id="video" autoplay playsinline></video>
-    <canvas id="canvas"></canvas>
-    <p id="classification"></p>
-    <audio id="warning-audio" src="leg_raises.mp3"></audio>
+  <div class="container">
+    <div class="app-header">
+      <h1 class="app-title">FITFLEX</h1>
+      <p class="app-subtitle">Leg Raise Detection</p>
+    </div>
+    
+    <div class="video-container">
+      <video id="video" autoplay playsinline></video>
+      <canvas id="canvas"></canvas>
+      <div id="warning"></div>
+      <div id="debug"></div>
+      <div class="angle-display">
+        Knee Angle: <span id="knee-angle" class="angle-value">0°</span>
+      </div>
+      <div class="voice-indicator">
+        <div class="voice-dot"></div>
+        Voice Control Active
+      </div>
+      <div class="voice-commands-help">
+        <div class="voice-help-toggle">Voice Commands Help</div>
+        <div class="voice-commands-list">
+          <div class="voice-command-item">
+            <span class="command">Start / Begin / Go</span>
+            <span class="action">Start workout</span>
+          </div>
+          <div class="voice-command-item">
+            <span class="command">Stop / End / Finish</span>
+            <span class="action">Stop workout</span>
+          </div>
+          <div class="voice-command-item">
+            <span class="command">Reset / Restart</span>
+            <span class="action">Reset workout</span>
+          </div>
+        </div>
+      </div>
+    </div>
+    
+    <div id="controls">
+      <div class="timer" id="exercise-time">00:00</div>
+      <button id="start-button" class="button start">Start Workout</button>
+      <button id="stop-button" class="button stop hidden">End Workout</button>
+      <button id="reset-button" class="button reset hidden">Reset</button>
+    </div>
+    
+    <div id="results">
+      <h2 class="results-title">Workout Complete</h2>
+      <div class="stats-container">
+        <div class="stat-row">
+          <span class="stat-label">Total Time:</span>
+          <span id="total-time" class="stat-value">00:00</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">Total Mistakes:</span>
+          <span id="mistake-count" class="stat-value">0</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">Mistakes per Min:</span>
+          <span id="mistake-rate" class="stat-value">0</span>
+        </div>
+      </div>
+      <button id="close-results" class="button close">Close</button>
+    </div>
+    
+    <div id="voice-toast" class="voice-command-toast">Command recognized</div>
+  </div>
+  
+  <audio id="warning-audio" src="leg_raises.mp3" preload="auto"></audio>
 
-    <script>
-        const videoElement = document.getElementById('video');
-        const canvasElement = document.getElementById('canvas');
-        const canvasCtx = canvasElement.getContext('2d');
-        const classificationText = document.getElementById('classification');
-        const warningAudio = document.getElementById('warning-audio');
+  <script>
+    // DOM Elements
+    const videoElement = document.getElementById('video');
+    const canvasElement = document.getElementById('canvas');
+    const canvasCtx = canvasElement.getContext('2d');
+    const warningText = document.getElementById('warning');
+    const debugText = document.getElementById('debug');
+    const kneeAngleElement = document.getElementById('knee-angle');
+    const warningAudio = document.getElementById('warning-audio');
+    const exerciseTimeElement = document.getElementById('exercise-time');
+    const totalTimeElement = document.getElementById('total-time');
+    const mistakeCountElement = document.getElementById('mistake-count');
+    const mistakeRateElement = document.getElementById('mistake-rate');
+    const startButton = document.getElementById('start-button');
+    const stopButton = document.getElementById('stop-button');
+    const resetButton = document.getElementById('reset-button');
+    const resultsPanel = document.getElementById('results');
+    const closeResultsButton = document.getElementById('close-results');
+    const voiceToast = document.getElementById('voice-toast');
 
-        async function setupCamera() {
-            const stream = await navigator.mediaDevices.getUserMedia({ video: true });
-            videoElement.srcObject = stream;
-            return new Promise((resolve) => {
-                videoElement.onloadedmetadata = () => resolve(videoElement);
-            });
-        }
+    // State variables
+    let mistakeCount = 0;
+    let isInMistakeState = false;
+    let exerciseStartTime = 0;
+    let exerciseTimer;
+    let isExercising = false;
+    let totalExerciseTime = 0;
+    let recognition = null;
 
-        function calculateAngle(a, b, c) {
-            const ba = [a.x - b.x, a.y - b.y];
-            const bc = [c.x - b.x, c.y - b.y];
-            const cosineAngle = (ba[0] * bc[0] + ba[1] * bc[1]) /
-                                (Math.sqrt(ba[0] ** 2 + ba[1] ** 2) * Math.sqrt(bc[0] ** 2 + bc[1] ** 2));
-            return Math.acos(Math.max(-1, Math.min(1, cosineAngle))) * (180 / Math.PI);
-        }
+    async function setupCamera() {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+        videoElement.srcObject = stream;
+        return new Promise((resolve) => {
+            videoElement.onloadedmetadata = () => {
+                canvasElement.width = videoElement.videoWidth;
+                canvasElement.height = videoElement.videoHeight;
+                resolve(videoElement);
+            };
+        });
+    }
 
-        function onResults(results) {
-            canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
-            canvasCtx.drawImage(videoElement, 0, 0, canvasElement.width, canvasElement.height);
+    function calculateAngle(a, b, c) {
+        const ba = [a.x - b.x, a.y - b.y];
+        const bc = [c.x - b.x, c.y - b.y];
+        const cosineAngle = (ba[0] * bc[0] + ba[1] * bc[1]) /
+                            (Math.sqrt(ba[0] ** 2 + ba[1] ** 2) * Math.sqrt(bc[0] ** 2 + bc[0] ** 2));
+        return Math.acos(Math.max(-1, Math.min(1, cosineAngle))) * (180 / Math.PI);
+    }
+
+    // Button event listeners
+    startButton.addEventListener('click', startExercise);
+    stopButton.addEventListener('click', stopExercise);
+    resetButton.addEventListener('click', resetExercise);
+    closeResultsButton.addEventListener('click', closeResults);
+
+    function onResults(results) {
+        canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+        canvasCtx.drawImage(videoElement, 0, 0, canvasElement.width, canvasElement.height);
+        
+        if (results.poseLandmarks) {
+            // Draw pose landmarks and connections
+            drawConnectors(canvasCtx, results.poseLandmarks, POSE_CONNECTIONS, { color: '#00FF7F', lineWidth: 4 });
+            drawLandmarks(canvasCtx, results.poseLandmarks, { color: '#FFFFFF', lineWidth: 2, radius: 6 });
             
-            if (results.poseLandmarks) {
-                const landmarks = results.poseLandmarks;
-                const leftHip = landmarks[23]; 
-                const leftKnee = landmarks[25];
-                const leftAnkle = landmarks[27];
+            const landmarks = results.poseLandmarks;
+            const leftHip = landmarks[23]; 
+            const leftKnee = landmarks[25];
+            const leftAnkle = landmarks[27];
 
-                const kneeAngle = calculateAngle(leftHip, leftKnee, leftAnkle);
-                let classification = "";
+            const kneeAngle = calculateAngle(leftHip, leftKnee, leftAnkle);
+            let classification = "";
 
-                if (kneeAngle >= 175) {
-                    classification = "Correct";
-                } else if (kneeAngle >= 150) {
-                    classification = "Almost Correct";
-                } else {
-                    classification = "Incorrect";
-                    if (warningAudio.paused) warningAudio.play();
+            // Update angle display
+            kneeAngleElement.textContent = `${Math.round(kneeAngle)}°`;
+
+            if (kneeAngle >= 175) {
+                classification = "Correct";
+                warningText.innerText = "";
+                isInMistakeState = false;
+            } else if (kneeAngle >= 150) {
+                classification = "Almost Correct";
+                warningText.innerText = "Straighten Your Leg More!";
+                if (isExercising && !isInMistakeState) {
+                    isInMistakeState = true;
                 }
-
-                classificationText.innerText = `Left Knee Angle: ${kneeAngle.toFixed(2)}° - ${classification}`;
+            } else {
+                classification = "Incorrect";
+                warningText.innerText = "Incorrect Leg Raise Form!";
+                if (isExercising && !isInMistakeState) {
+                    mistakeCount++;
+                    if (warningAudio.paused) warningAudio.play();
+                    isInMistakeState = true;
+                }
             }
+
+            // Debug information
+            debugText.innerHTML = `
+                Knee Angle: ${Math.round(kneeAngle)}°<br>
+                Classification: ${classification}<br>
+                Mistakes: ${mistakeCount}
+            `;
         }
+    }
 
-        async function main() {
-            await setupCamera();
-            canvasElement.width = videoElement.videoWidth;
-            canvasElement.height = videoElement.videoHeight;
+    // Initialize always-active speech recognition
+    function initSpeechRecognition() {
+      if ('webkitSpeechRecognition' in window) {
+        recognition = new webkitSpeechRecognition();
+        recognition.continuous = true;
+        recognition.interimResults = false;
+        recognition.lang = 'en-US';
 
-            const pose = new Pose({ locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}` });
-            pose.setOptions({ modelComplexity: 1, smoothLandmarks: true, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5 });
-            pose.onResults(onResults);
+        // Voice indicator elements
+        const voiceIndicator = document.querySelector('.voice-indicator');
+        const voiceDot = document.querySelector('.voice-dot');
 
-            async function detect() {
+        recognition.onstart = function() {
+          console.log('Voice recognition started');
+          voiceIndicator.style.backgroundColor = 'rgba(0, 255, 127, 0.3)';
+          voiceDot.style.animation = 'pulse 2s infinite';
+        };
+
+        recognition.onresult = function(event) {
+          const last = event.results.length - 1;
+          const command = event.results[last][0].transcript.trim().toLowerCase();
+          const confidence = event.results[last][0].confidence;
+          console.log('Voice command:', command, 'Confidence:', confidence);
+
+          // Flash the indicator to show a command was heard
+          voiceIndicator.style.backgroundColor = 'rgba(0, 255, 127, 0.7)';
+          setTimeout(() => {
+            voiceIndicator.style.backgroundColor = 'rgba(0, 0, 0, 0.7)';
+          }, 300);
+
+          // Only process commands with decent confidence
+          if (confidence > 0.3) {
+            // Start command variations
+            if (
+              command.includes('start') ||
+              command.includes('begin') ||
+              command.includes('go') ||
+              command.includes('start workout')
+            ) {
+              if (!isExercising && !resetButton.classList.contains('hidden')) {
+                resetExercise();
+                setTimeout(() => startExercise(), 500);
+              } else if (!isExercising) {
+                startExercise();
+              }
+              showVoiceToast('Starting workout');
+            }
+            // Stop command variations
+            else if (
+              command.includes('stop') ||
+              command.includes('end') ||
+              command.includes('finish') ||
+              command.includes('stop workout') ||
+              command.includes('end workout')
+            ) {
+              if (isExercising) {
+                stopExercise();
+                showVoiceToast('Stopping workout');
+              }
+            }
+            // Reset command variations
+            else if (
+              command.includes('reset') ||
+              command.includes('restart') ||
+              command.includes('start over') ||
+              command.includes('clear')
+            ) {
+              if (!startButton.classList.contains('hidden')) {
+                resetExercise();
+                showVoiceToast('Resetting workout');
+              }
+            }
+          }
+        };
+
+        recognition.onerror = function(event) {
+          console.log('Error occurred in recognition: ' + event.error);
+          // Visual indication of error
+          voiceIndicator.style.backgroundColor = 'rgba(255, 59, 48, 0.3)';
+          setTimeout(() => {
+            voiceIndicator.style.backgroundColor = 'rgba(0, 0, 0, 0.7)';
+          }, 1000);
+
+          // Restart recognition after error
+          setTimeout(() => {
+            try {
+              recognition.start();
+            } catch (e) {
+              console.log('Could not restart speech recognition after error');
+            }
+          }, 1000);
+        };
+
+        recognition.onend = function() {
+          console.log('Voice recognition ended');
+          // Visual indication speech recognition ended
+          voiceDot.style.animation = 'none';
+          // Restart recognition to keep it continuous
+          setTimeout(() => {
+            try {
+              recognition.start();
+            } catch (e) {
+              console.log('Could not restart speech recognition');
+            }
+          }, 500);
+        };
+
+        // Start recognition automatically
+        try {
+          recognition.start();
+        } catch (e) {
+          console.log('Could not start speech recognition', e);
+          voiceIndicator.style.display = 'none';
+        }
+      } else {
+        console.log('Speech Recognition not supported');
+        document.querySelector('.voice-indicator').style.display = 'none';
+      }
+    }
+
+    // Toast notification for voice commands
+    function showVoiceToast(message) {
+      voiceToast.textContent = message;
+      voiceToast.classList.add('show');
+      if (voiceToast.timeoutId) {
+        clearTimeout(voiceToast.timeoutId);
+      }
+      voiceToast.timeoutId = setTimeout(() => {
+        voiceToast.classList.remove('show');
+      }, 2000);
+    }
+
+    function startExercise() {
+      isExercising = true;
+      mistakeCount = 0;
+      isInMistakeState = false;
+      
+      // Update UI
+      startButton.classList.add('hidden');
+      stopButton.classList.remove('hidden');
+      resetButton.classList.add('hidden');
+      
+      // Start timer
+      exerciseStartTime = Date.now();
+      exerciseTimer = setInterval(updateExerciseTime, 1000);
+      showVoiceToast('Workout started');
+    }
+
+    function stopExercise() {
+      isExercising = false;
+      clearInterval(exerciseTimer);
+      
+      // Calculate total time in seconds
+      totalExerciseTime = Math.floor((Date.now() - exerciseStartTime) / 1000);
+      
+      // Update UI
+      stopButton.classList.add('hidden');
+      resetButton.classList.remove('hidden');
+      
+      // Show results
+      displayResults();
+    }
+
+    function resetExercise() {
+      resetButton.classList.add('hidden');
+      startButton.classList.remove('hidden');
+      exerciseTimeElement.textContent = "00:00";
+      warningText.innerText = "";
+    }
+
+    function displayResults() {
+      const minutes = Math.floor(totalExerciseTime / 60);
+      const seconds = totalExerciseTime % 60;
+      totalTimeElement.textContent = `${minutes}:${seconds.toString().padStart(2, '0')}`;
+      mistakeCountElement.textContent = mistakeCount;
+      const mistakesPerMinute = totalExerciseTime > 0 ?
+        ((mistakeCount / totalExerciseTime) * 60).toFixed(2) : 0;
+      mistakeRateElement.textContent = mistakesPerMinute;
+      resultsPanel.style.display = 'block';
+    }
+
+    function closeResults() {
+      resultsPanel.style.display = 'none';
+    }
+
+    function updateExerciseTime() {
+      const elapsedTime = Math.floor((Date.now() - exerciseStartTime) / 1000);
+      const minutes = Math.floor(elapsedTime / 60);
+      const seconds = elapsedTime % 60;
+      exerciseTimeElement.textContent = `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+    }
+
+    async function main() {
+        await setupCamera();
+
+        const pose = new Pose({ locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}` });
+        pose.setOptions({
+            modelComplexity: 1,
+            smoothLandmarks: true,
+            minDetectionConfidence: 0.5,
+            minTrackingConfidence: 0.5
+        });
+
+        pose.onResults(onResults);
+
+        const camera = new Camera(videoElement, {
+            onFrame: async () => {
                 await pose.send({ image: videoElement });
-                requestAnimationFrame(detect);
+            },
+            width: 640,
+            height: 480
+        });
+        camera.start();
+        
+        // Initialize voice recognition
+        initSpeechRecognition();
+        
+        // Set up voice help toggle
+        const voiceHelpToggle = document.querySelector('.voice-help-toggle');
+        const voiceCommandsList = document.querySelector('.voice-commands-list');
+        
+        voiceHelpToggle.addEventListener('click', () => {
+            voiceCommandsList.classList.toggle('show');
+        });
+        
+        // Handle window resize for responsiveness
+        window.addEventListener('resize', () => {
+            if (videoElement.videoWidth > 0) {
+                const containerWidth = document.querySelector('.video-container').clientWidth;
+                const scale = containerWidth / videoElement.videoWidth;
+                // Maintain aspect ratio
+                canvasElement.style.width = '100%';
+                canvasElement.style.height = 'auto';
             }
+        });
+    }
 
-            detect();
-        }
-
-        main();
-    </script>
+    // Start the application
+    main();
+  </script>
 </body>
 </html>
